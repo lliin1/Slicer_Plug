@@ -1,0 +1,588 @@
+import logging
+import os
+from typing import Annotated
+
+import vtk
+import qt
+
+import slicer
+from slicer.i18n import tr as _
+from slicer.i18n import translate
+from slicer.ScriptedLoadableModule import *
+from slicer.util import VTKObservationMixin
+from slicer.parameterNodeWrapper import (
+    parameterNodeWrapper,
+    WithinRange,
+)
+
+from slicer import vtkMRMLScalarVolumeNode
+
+from ctk import ctkCollapsibleButton
+
+#
+# RS
+#
+
+
+class RS(ScriptedLoadableModule):
+    """Uses ScriptedLoadableModule base class, available at:
+    https://github.com/Slicer/Slicer/blob/main/Base/Python/slicer/ScriptedLoadableModule.py
+    """
+
+    def __init__(self, parent):
+        ScriptedLoadableModule.__init__(self, parent)
+        self.parent.title = _("RS")  # TODO: make this more human readable by adding spaces
+        # TODO: set categories (folders where the module shows up in the module selector)
+        self.parent.categories = [translate("qSlicerAbstractCoreModule", "Examples")]
+        self.parent.dependencies = []  # TODO: add here list of module names that this module requires
+        self.parent.contributors = ["John Doe (AnyWare Corp.)"]  # TODO: replace with "Firstname Lastname (Organization)"
+        # TODO: update with short description of the module and a link to online module documentation
+        # _() function marks text as translatable to other languages
+        self.parent.helpText = _("""
+This is an example of scripted loadable module bundled in an extension.
+See more information in <a href="https://github.com/organization/projectname#RS">module documentation</a>.
+""")
+        # TODO: replace with organization, grant and thanks
+        self.parent.acknowledgementText = _("""
+This file was originally developed by Jean-Christophe Fillion-Robin, Kitware Inc., Andras Lasso, PerkLab,
+and Steve Pieper, Isomics, Inc. and was partially funded by NIH grant 3P41RR013218-12S1.
+""")
+
+        # Additional initialization step after application startup is complete
+        slicer.app.connect("startupCompleted()", registerSampleData)
+
+
+#
+# Register sample data sets in Sample Data module
+#
+
+
+def registerSampleData():
+    """Add data sets to Sample Data module."""
+    # It is always recommended to provide sample data for users to make it easy to try the module,
+    # but if no sample data is available then this method (and associated startupCompeted signal connection) can be removed.
+
+    import SampleData
+
+    iconsPath = os.path.join(os.path.dirname(__file__), "Resources/Icons")
+
+    # To ensure that the source code repository remains small (can be downloaded and installed quickly)
+    # it is recommended to store data sets that are larger than a few MB in a Github release.
+
+    # RS1
+    SampleData.SampleDataLogic.registerCustomSampleDataSource(
+        # Category and sample name displayed in Sample Data module
+        category="RS",
+        sampleName="RS1",
+        # Thumbnail should have size of approximately 260x280 pixels and stored in Resources/Icons folder.
+        # It can be created by Screen Capture module, "Capture all views" option enabled, "Number of images" set to "Single".
+        thumbnailFileName=os.path.join(iconsPath, "RS1.png"),
+        # Download URL and target file name
+        uris="https://github.com/Slicer/SlicerTestingData/releases/download/SHA256/998cb522173839c78657f4bc0ea907cea09fd04e44601f17c82ea27927937b95",
+        fileNames="RS1.nrrd",
+        # Checksum to ensure file integrity. Can be computed by this command:
+        #  import hashlib; print(hashlib.sha256(open(filename, "rb").read()).hexdigest())
+        checksums="SHA256:998cb522173839c78657f4bc0ea907cea09fd04e44601f17c82ea27927937b95",
+        # This node name will be used when the data set is loaded
+        nodeNames="RS1",
+    )
+
+    # RS2
+    SampleData.SampleDataLogic.registerCustomSampleDataSource(
+        # Category and sample name displayed in Sample Data module
+        category="RS",
+        sampleName="RS2",
+        thumbnailFileName=os.path.join(iconsPath, "RS2.png"),
+        # Download URL and target file name
+        uris="https://github.com/Slicer/SlicerTestingData/releases/download/SHA256/1a64f3f422eb3d1c9b093d1a18da354b13bcf307907c66317e2463ee530b7a97",
+        fileNames="RS2.nrrd",
+        checksums="SHA256:1a64f3f422eb3d1c9b093d1a18da354b13bcf307907c66317e2463ee530b7a97",
+        # This node name will be used when the data set is loaded
+        nodeNames="RS2",
+    )
+
+
+#
+# RSParameterNode
+#
+
+
+@parameterNodeWrapper
+class RSParameterNode:
+    """
+    The parameters needed by module.
+
+    inputVolume - The volume to threshold.
+    imageThreshold - The value at which to threshold the input volume.
+    invertThreshold - If true, will invert the threshold.
+    thresholdedVolume - The output volume that will contain the thresholded volume.
+    invertedVolume - The output volume that will contain the inverted thresholded volume.
+    """
+
+    inputVolume: vtkMRMLScalarVolumeNode
+    imageThreshold: Annotated[float, WithinRange(-100, 500)] = 100
+    invertThreshold: bool = False
+    thresholdedVolume: vtkMRMLScalarVolumeNode
+    invertedVolume: vtkMRMLScalarVolumeNode
+
+
+#
+# RSWidget
+#
+
+# IGTL_STATE_OFF = 0
+# IGTL_STATE_WAIT_CONNECTION = 1
+# IGTL_STATE_CONNECTED = 2
+
+# CONNECTED_EVENT = 19001
+# DISCONNECTED_EVENT = 19002
+
+class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
+    """Uses ScriptedLoadableModuleWidget base class, available at:
+    https://github.com/Slicer/Slicer/blob/main/Base/Python/slicer/ScriptedLoadableModule.py
+    """
+
+    def __init__(self, parent=None) -> None:
+        """Called when the user opens the module the first time and the widget is initialized."""
+        ScriptedLoadableModuleWidget.__init__(self, parent)
+        VTKObservationMixin.__init__(self)  # needed for parameter node observation
+        
+        self.pointsSet = []
+        self.pathModelNode = None
+        self._currentConnectionState = None
+        self._hasEverConnected = False
+        self.heartbeatTimer = None
+
+        self.igtlConnector = None
+        self.logic = None
+        self._parameterNode = None
+        self._parameterNodeGuiTag = None
+
+    def setup(self) -> None:
+        """Called when the user opens the module the first time and the widget is initialized."""
+        ScriptedLoadableModuleWidget.setup(self)
+
+        # 创建可折叠面板
+        connectionCollapsible = ctkCollapsibleButton()
+        connectionCollapsible.text = "通信"
+        self.layout.addWidget(connectionCollapsible)
+        
+        formLayout = qt.QFormLayout(connectionCollapsible)
+
+        # 目标 IP
+        self.targetIp = qt.QLineEdit("127.0.0.1")
+        targetIP_Label = qt.QLabel("目标IP:")
+        targetIP_Label.setStyleSheet("font-weight:bold;font-size:10pt;color:black")
+        formLayout.addRow(targetIP_Label,self.targetIp)
+
+        # 目标端口
+        self.targetPort = qt.QLineEdit("18944")
+        targetPort_Label = qt.QLabel("目标端口:")
+        targetPort_Label.setStyleSheet("font-weight:bold;font-size:10pt;color:black")
+        formLayout.addRow(targetPort_Label,self.targetPort)
+
+        # 按钮区域
+        buttonLayout = qt.QHBoxLayout()
+        self.connectButton = qt.QPushButton("连接")
+        self.disconnectButton = qt.QPushButton("关闭")
+        self.disconnectButton.enabled = False
+        buttonLayout.addWidget(self.connectButton)
+        buttonLayout.addWidget(self.disconnectButton)
+        formLayout.addRow(buttonLayout)
+
+        # 连接状态
+        self.statusLabel = qt.QLabel("连接断开")
+        statusText_Label = qt.QLabel("状态:")
+        self.statusLabel.setStyleSheet("font-weight:bold;font-size:10pt;color:red")
+        statusText_Label.setStyleSheet("font-weight:bold;font-size:10pt;color:black")
+        formLayout.addRow(statusText_Label,self.statusLabel)
+
+        # 路径名
+        pathLabel = qt.QLabel("路径名:")
+        pathLabel.setStyleSheet("font-weight:bold;font-size:10pt;color:black")
+        self.pathEdit = qt.QLineEdit("CC")
+        formLayout.addRow(pathLabel,self.pathEdit)
+
+        # 获取路径
+        self.getPath_Button = qt.QPushButton("获取路径")
+        formLayout.addRow(self.getPath_Button)
+
+        # 发送路径
+        self.sendPath_Button = qt.QPushButton("发送路径")
+        formLayout.addRow(self.sendPath_Button)
+
+        # 连接信号
+        self.connectButton.connect('clicked()',self.onConnect)
+        self.disconnectButton.connect('clicked()',self.onDisconnect)
+        self.getPath_Button.connect('clicked()',self.onGetPath)
+        self.sendPath_Button.connect('clicked()',self.onStorePath)
+
+        # Create logic class. Logic implements all computations that should be possible to run
+        # in batch mode, without a graphical user interface.
+        self.logic = RSLogic()
+
+        # Connections
+
+        # These connections ensure that we update parameter node when scene is closed
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
+
+        # Buttons
+        
+        # Make sure parameter node is initialized (needed for module reload)
+        self.initializeParameterNode()
+
+    def onConnect(self)->None:
+        if self.igtlConnector:
+            self.onDisconnect()
+        try:
+            host = self.targetIp.text.strip()
+        except:
+            self.showError("请输入目标地址")
+        try:
+            port = int(self.targetPort.text.strip())
+        except:
+            self.showError("请输入目标端口")
+
+        # 创建 IGTL 连接器
+        self.igtlConnector = slicer.vtkMRMLIGTLConnectorNode()
+        self.igtlConnector.SetTypeClient(host,port)
+        slicer.mrmlScene.AddNode(self.igtlConnector)
+
+        # 创建 ModelNode 并注册为 outgoing
+        self.pathModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode","RobotPath")
+        self.pathModelNode.SetAttribute("HideFromEditors","true")
+        self.igtlConnector.RegisterOutgoingMRMLNode(self.pathModelNode)
+
+        # 创建心跳节点
+        self.heartbeatNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode","Heartbeat")
+        self.heartbeatNode.SetAttribute("HideFromEditors","true")
+        self.igtlConnector.RegisterOutgoingMRMLNode(self.heartbeatNode)
+
+        self.igtlConnector.Start()
+
+        self.heartbeatTimer = qt.QTimer()
+        self.heartbeatTimer.setInterval(1000)
+        self.heartbeatTimer.connect('timeout()',self._sendHeartbeat)
+        self.heartbeatTimer.start()
+
+        # 添加观察器: 监听连接器状态变化
+        self.addObserver(self.igtlConnector,vtk.vtkCommand.ModifiedEvent,self._onConnectorModified)
+
+        # 监听服务器发来的 STATUS 消息
+        # self.statusNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLIGTLStatusNode","ServerControl")
+        # self.statusNode.SetIgtlDeviceName("ServerControl")
+        # self.statusNode.SetAttribute("HideFromEditors","true")
+        # self.igtlConnector.RegisterIncomingMRMLNode(self.statusNode)
+        self.addObserver(slicer.mrmlScene,slicer.vtkMRMLScene.NodeAddedEvent,self._onNodeAdded)
+
+        # 启动连接器后立即同步一次状态
+        self._onConnectorModified(self.igtlConnector,vtk.vtkCommand.ModifiedEvent)
+
+        # 网络状态
+        self.statusLabel.setText("连接中...")
+        self.statusLabel.setStyleSheet("font-weight:bold;font-size:10pt;color:orange")
+        self.connectButton.enabled = False
+        self.disconnectButton.enabled = True
+        self._hasEverConnected = False
+
+    def _onNodeAdded(self,caller,event,callData):
+        node = callData
+        if not node or not isinstance(node,slicer.vtkMRMLIGTLStatusNode):
+            return
+        
+        # 检查是否是我们关心的 DeviceName
+        device_name = node.GetIgtlDeviceName()
+        print(f"[DEBUG] New IGTLStatusNode created: {node.GetName()},DeviceName='{device_name}")
+
+        if device_name == "ServerControl":
+            # 如果已有 statusNode,先移除旧观察器
+            if hasattr(self,'statusNode') and self.statusNode:
+                self.RemoveObserver(self.statusNode,vtk.vtkCommand.ModifiedEvent,self._onServerStatusUpdate)
+            # 找到目标状态节点!保存引用并添加观测器
+            self.statusNode = node
+            self.statusNode.SetAttribute("HideFromEditors","true")
+            self.addObserver(self.statusNode,vtk.vtkCommand.ModifiedEvent,self._onServerStatusUpdate)
+
+    def _onServerStatusUpdate(self,caller,event):
+        if not hasattr(self,'statusNode') or not self.statusNode:
+            return
+        status_string = self.statusNode.GetStatusString()
+        if status_string and "shutting down" in status_string.lower():
+            print("Received server shutdown notification:",status_string)
+            self._handleDisconnection()
+    def _onConnectorModified(self,caller,event):
+        if not self.igtlConnector:
+            return
+
+        state = self.igtlConnector.GetState()
+        print(f"[DEBUG] state={state}, _hasEverConnected={self._hasEverConnected}")
+
+        if state == 2: # CONNECTED
+            # print("进入\n")
+            if not self._hasEverConnected:
+                print(f"{self._hasEverConnected}\n")
+                self._hasEverConnected = True
+                self.statusLabel.setText("已连接")
+                self.statusLabel.setStyleSheet("color:green")
+                self.connectButton.enabled = False
+                self.disconnectButton.enabled = True
+        elif state == 0: # DISCONNECTED
+            if self._hasEverConnected:
+                self._handleDisconnection()
+            else:
+                # 从未成功连接过
+                self._cleanupConnectorResources()
+                self.statusLabel.setText("连接失败")
+                self.statusLabel.setStyleSheet("color:red")
+                self.connectButton.enabled = True
+                self.disconnectButton.enabled = False
+
+    def _cleanupConnectorResources(self)->None:
+        if hasattr(self,'heartbeatTimer') and self.heartbeatTimer:
+            self.heartbeatTimer.stop()
+            self.heartbeatTimer = None
+        
+        if self.igtlConnector:
+            # 移除对连接器的观察器
+            self.removeObserver(self.igtlConnector,vtk.vtkCommand.ModifiedEvent,self._onConnectorModified)
+            self.igtlConnector.Stop()
+            slicer.mrmlScene.RemoveNode(self.igtlConnector)
+            self.igtlConnector = None
+
+        # 移除可能残留的节点
+        for nodeName in ["RobotPath","Heartbeat","ServerControl"]:
+            node = slicer.mrmlScene.GetFirstNodeByName(nodeName)
+            if node:
+                slicer.mrmlScene.RemoveNode(node)
+        
+        self.pathModelNode = None
+
+        # 移除场景节点添加观察器
+        self.removeObserver(slicer.mrmlScene,slicer.vtkMRMLScene.NodeAddedEvent,self._onNodeAdded)
+
+        # 清理状态节点引用和观察器
+        if hasattr(self,'statusNode') and self.statusNode:
+            self.removeObserver(self.statusNode,vtk.vtkCommand.ModifiedEvent,self._onServerStatusUpdate)
+            self.statusNode = None
+        self._hasEverConnected = False
+
+    def _handleDisconnection(self):
+        self._cleanupConnectorResources()
+
+        # 更新 UI
+        self.statusLabel.setText("连接断开")
+        self.statusLabel.setStyleSheet("font-weight:bold;font-size:10pt;color:red")
+        self.connectButton.enabled = True
+        self.disconnectButton.enabled = False
+
+    def _sendHeartbeat(self):
+        if not self.igtlConnector or self.igtlConnector.GetState() != 2:
+            return
+        
+        poly = vtk.vtkPolyData()
+        points = vtk.vtkPoints()
+        points.InsertNextPoint(0.0,0.0,0.0)
+        poly.SetPoints(points)
+
+        self.heartbeatNode.SetAndObservePolyData(poly)
+        self.heartbeatNode.Modified()
+        self.igtlConnector.PushNode(self.heartbeatNode)
+
+    def onDisconnect(self)->None:
+        self._handleDisconnection()
+
+    def onGetPath(self)->None:
+        pathName = self.pathEdit.text.strip()
+        
+        if pathName=="":
+            self.showError("请输入路径名")
+            return
+        try:
+            pathNode = slicer.util.getNode(pathName)
+        except slicer.util.MRMLNodeNotFoundException:
+            pathNode = None
+            if pathName:
+                self.showError("请导入模型文件")
+            else:
+                self.showError("请输入正确的路径名")
+            return
+
+        # 检查是否为 Markups 节点
+        if not hasattr(pathNode,'GetNumberOfControlPoints'):
+            self.showError("请选择一个 Markups 节点")
+            return
+        
+        self.pointsSet.clear()
+
+        # 遍历所有点,获取点坐标
+        pointsNum = pathNode.GetNumberOfControlPoints()
+
+        if pointsNum == 0:
+            self.showError("该 Markups 节点没有控制点")
+            return
+        
+        # 默认姿态(四元数)
+        default_quat = [0.0,0.0,0.0,1.0]
+
+        if pointsNum > 0:
+            for i in range(pointsNum):
+                points = [0.0,0.0,0.0]
+                pathNode.GetNthControlPointPositionWorld(i,points)
+                self.pointsSet.append((points,default_quat))
+        else:
+            print("没有足够的点位进行计算\n")
+            return
+        
+        print("已获取路径点位")
+
+    def createPathPolyDataWithOrientation(self,points_with_orientation):
+        if points_with_orientation is None:
+            return
+
+        polyData = vtk.vtkPolyData()
+        vtk_points = vtk.vtkPoints()
+        quat_array = vtk.vtkFloatArray()
+        quat_array.SetName("Orientation") # 命名数组
+        quat_array.SetNumberOfComponents(4) # 四元数
+        quat_array.SetNumberOfTuples(len(points_with_orientation))
+
+        for i,(pos,quat) in enumerate(points_with_orientation):
+            vtk_points.InsertNextPoint(pos[0],pos[1],pos[2])
+            quat_array.SetTuple4(i,quat[0],quat[1],quat[2],quat[3])
+
+        polyData.SetPoints(vtk_points)
+        polyData.GetPointData().AddArray(quat_array)
+        return polyData
+
+    def onStorePath(self)->None:
+        if not self.pointsSet:
+            slicer.util.warningDisplay("请先获取路径点")
+            return
+
+        if self.igtlConnector is None or self.igtlConnector.GetState() != 2:
+            slicer.util.warningDisplay("连接已断开,请重新连接!")
+            return
+
+        # 创建 PolyData
+        polyData = vtk.vtkPolyData()
+        points = vtk.vtkPoints()
+        vertices = vtk.vtkCellArray()
+
+        for pos,quat in self.pointsSet:
+            pointId = points.InsertNextPoint(pos[0],pos[1],pos[2])
+            vertices.InsertNextCell(1)
+            vertices.InsertCellPoint(pointId)
+
+        polyData.SetPoints(points)
+        polyData.SetVerts(vertices)
+
+        # 添加方向数组
+        quat_array = vtk.vtkFloatArray()
+        quat_array.SetName("Orientation")
+        quat_array.SetNumberOfComponents(4)
+        for pos,quat in self.pointsSet:
+            quat_array.InsertNextTuple4(quat[0],quat[1],quat[2],quat[3])
+        polyData.GetPointData().AddArray(quat_array)
+
+        # 更新模型数据
+        self.pathModelNode.SetAndObservePolyData(polyData)
+        self.pathModelNode.Modified()
+        self.igtlConnector.PushNode(self.pathModelNode)
+
+        
+        # 更新数据 -> 触动自动发送
+        print(f"已发送{len(self.pointsSet)} 个位姿 (POLYDATA) 到 IGTL 服务器")
+        slicer.util.infoDisplay(f"成功发送 {len(self.pointsSet)} 个路径点!")
+
+    def showError(self,message)->None:
+        slicer.util.errorDisplay(message)
+
+    def cleanup(self) -> None:
+        """Called when the application closes and the module widget is destroyed."""
+        self.onDisconnect()
+        self.removeObservers()
+
+    def enter(self) -> None:
+        """Called each time the user opens this module."""
+        # Make sure parameter node exists and observed
+        self.initializeParameterNode()
+
+    def exit(self) -> None:
+        """Called each time the user opens a different module."""
+        # Do not react to parameter node changes (GUI will be updated when the user enters into the module)
+        if self._parameterNode:
+            self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+            self._parameterNodeGuiTag = None
+            self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanApply)
+
+    def onSceneStartClose(self, caller, event) -> None:
+        """Called just before the scene is closed."""
+        # Parameter node will be reset, do not use it anymore
+        self.setParameterNode(None)
+
+    def onSceneEndClose(self, caller, event) -> None:
+        """Called just after the scene is closed."""
+        # If this module is shown while the scene is closed then recreate a new parameter node immediately
+        if self.parent.isEntered:
+            self.initializeParameterNode()
+
+    def initializeParameterNode(self) -> None:
+        """Ensure parameter node exists and observed."""
+        # Parameter node stores all user choices in parameter values, node selections, etc.
+        # so that when the scene is saved and reloaded, these settings are restored.
+
+        self.setParameterNode(self.logic.getParameterNode())
+
+        # Select default input nodes if nothing is selected yet to save a few clicks for the user
+        if not self._parameterNode.inputVolume:
+            firstVolumeNode = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLScalarVolumeNode")
+            if firstVolumeNode:
+                self._parameterNode.inputVolume = firstVolumeNode
+
+    def setParameterNode(self, inputParameterNode: RSParameterNode | None) -> None:
+        """
+        Set and observe parameter node.
+        Observation is needed because when the parameter node is changed then the GUI must be updated immediately.
+        """
+
+        if self._parameterNode:
+            self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+            self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanApply)
+        self._parameterNode = inputParameterNode
+        if self._parameterNode:
+            # Note: in the .ui file, a Qt dynamic property called "SlicerParameterName" is set on each
+            # ui element that needs connection.
+            # self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
+            self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._checkCanApply)
+            self._checkCanApply()
+
+    def _checkCanApply(self, caller=None, event=None) -> None:
+        pass
+
+    def onApplyButton(self) -> None:
+        pass
+
+
+#
+# RSLogic
+#
+
+
+class RSLogic(ScriptedLoadableModuleLogic):
+    """This class should implement all the actual
+    computation done by your module.  The interface
+    should be such that other python code can import
+    this class and make use of the functionality without
+    requiring an instance of the Widget.
+    Uses ScriptedLoadableModuleLogic base class, available at:
+    https://github.com/Slicer/Slicer/blob/main/Base/Python/slicer/ScriptedLoadableModule.py
+    """
+
+    def __init__(self) -> None:
+        """Called when the logic class is instantiated. Can be used for initializing member variables."""
+        ScriptedLoadableModuleLogic.__init__(self)
+
+    def getParameterNode(self):
+        return RSParameterNode(super().getParameterNode())
+
