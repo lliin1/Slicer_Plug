@@ -228,7 +228,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
 
         # Buttons
-        
+
         # Make sure parameter node is initialized (needed for module reload)
         self.initializeParameterNode()
 
@@ -270,21 +270,14 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.addObserver(self.igtlConnector,vtk.vtkCommand.ModifiedEvent,self._onConnectorModified)
 
         # 监听服务器发来的 STATUS 消息
-        # self.statusNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLIGTLStatusNode","ServerControl")
-        # self.statusNode.SetIgtlDeviceName("ServerControl")
-        # self.statusNode.SetAttribute("HideFromEditors","true")
-        # self.igtlConnector.RegisterIncomingMRMLNode(self.statusNode)
-        self.addObserver(slicer.mrmlScene,slicer.vtkMRMLScene.NodeAddedEvent,self._onNodeAdded)
-
+        self.statusNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLIGTLStatusNode","ServerControl")
+        self.statusNode.SetName("ServerControl")
+        self.statusNode.SetAttribute("HideFromEditors","true")
+        self.igtlConnector.RegisterIncomingMRMLNode(self.statusNode)
+        self.addObserver(self.statusNode,vtk.vtkCommand.ModifiedEvent,self._onServerStatusUpdate)
+        
         # 启动连接器后立即同步一次状态
         self._onConnectorModified(self.igtlConnector,vtk.vtkCommand.ModifiedEvent)
-
-        # 网络状态
-        self.statusLabel.setText("连接中...")
-        self.statusLabel.setStyleSheet("font-weight:bold;font-size:10pt;color:orange")
-        self.connectButton.enabled = False
-        self.disconnectButton.enabled = True
-        self._hasEverConnected = False
 
     def _onNodeAdded(self,caller,event,callData):
         node = callData
@@ -313,13 +306,14 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._handleDisconnection()
     def _onConnectorModified(self,caller,event):
         if not self.igtlConnector:
+            print("被移除\n")
             return
 
         state = self.igtlConnector.GetState()
         print(f"[DEBUG] state={state}, _hasEverConnected={self._hasEverConnected}")
 
         if state == 2: # CONNECTED
-            # print("进入\n")
+            print("进入连接\n")
             if not self._hasEverConnected:
                 print(f"{self._hasEverConnected}\n")
                 self._hasEverConnected = True
@@ -327,7 +321,15 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.statusLabel.setStyleSheet("color:green")
                 self.connectButton.enabled = False
                 self.disconnectButton.enabled = True
+        elif state == 1: # WAIT
+            print("等待连接\n")
+            self.statusLabel.setText("连接中")
+            self.statusLabel.setStyleSheet("color:orange")
+            self.connectButton.enabled = False
+            self.disconnectButton.enabled = True
+
         elif state == 0: # DISCONNECTED
+            print("进入断开\n")
             if self._hasEverConnected:
                 self._handleDisconnection()
             else:
@@ -359,7 +361,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.pathModelNode = None
 
         # 移除场景节点添加观察器
-        self.removeObserver(slicer.mrmlScene,slicer.vtkMRMLScene.NodeAddedEvent,self._onNodeAdded)
+        # self.removeObserver(slicer.mrmlScene,slicer.vtkMRMLScene.NodeAddedEvent,self._onNodeAdded)
 
         # 清理状态节点引用和观察器
         if hasattr(self,'statusNode') and self.statusNode:
