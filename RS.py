@@ -389,7 +389,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.heartbeatNode.SetAndObservePolyData(poly)
         self.heartbeatNode.Modified()
-        self.igtlConnector.PushNode(self.heartbeatNode)
+        # self.igtlConnector.PushNode(self.heartbeatNode)
 
     def onDisconnect(self)->None:
         self._handleDisconnection()
@@ -490,9 +490,8 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # 更新模型数据
         self.pathModelNode.SetAndObservePolyData(polyData)
         self.pathModelNode.Modified()
-        self.igtlConnector.PushNode(self.pathModelNode)
+        # self.igtlConnector.PushNode(self.pathModelNode)
 
-        
         # 更新数据 -> 触动自动发送
         print(f"已发送{len(self.pointsSet)} 个位姿 (POLYDATA) 到 IGTL 服务器")
         slicer.util.infoDisplay(f"成功发送 {len(self.pointsSet)} 个路径点!")

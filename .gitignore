@@ -1,0 +1,21 @@
+# 忽略 Python 字节码缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 编辑器/IDE 临时文件(防止产生 .swp, .swo, .DS_Store 等垃圾)
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# 虚拟环境(防止把库文件提交上去)
+venv/
+.env/
+ENV/
+
+# 测试产生的临时文件
+.pytest_cache/
+.coverage
+htmlcov/
