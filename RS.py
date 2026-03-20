@@ -19,6 +19,12 @@ from slicer import vtkMRMLScalarVolumeNode
 
 from ctk import ctkCollapsibleButton
 
+import numpy as np
+import math
+import struct
+
+import itertools
+
 #
 # RS
 #
@@ -146,9 +152,10 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Called when the user opens the module the first time and the widget is initialized."""
         ScriptedLoadableModuleWidget.__init__(self, parent)
         VTKObservationMixin.__init__(self)  # needed for parameter node observation
-        
+
         self.pointsSet = []
-        self.pathModelNode = None
+        # self.pathModelNode = None
+        self.pathStringNode = None
         self._currentConnectionState = None
         self._hasEverConnected = False
         self.heartbeatTimer = None
@@ -158,6 +165,35 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._parameterNode = None
         self._parameterNodeGuiTag = None
 
+        # 自动创建或获取 Transform 节点
+        self.calibNode = None
+        transform_node_name = "HandEyeCalibration"
+
+        try:
+            # 1. 尝试获取已存在的节点
+            self.calibNode = slicer.util.getNode(transform_node_name)
+            print(f"[INFO] 找到现有的变换节点: {transform_node_name}")
+        except slicer.util.MRMLNodeNotFoundException:
+            # 2. 如果不存在,创建一个新的 Transform 节点
+            print(f"[INFO] 未找到节点,正在创建新的 Transform 节点: {transform_node_name}...")
+            self.calibNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode",transform_node_name)
+
+            # 3. 初始化为单位矩阵(需要后期标定)
+            idensity_matrix = np.eye(4)
+
+            # 4. 创建 VTK 矩阵对象并填充数据
+            matrix_vtk = vtk.vtkMatrix4x4()
+            
+            # 将 numpy 数组转换为 vtkMatrix4x4 并设置到节点
+            slicer.util.updateVTKMatrixFromArray(matrix_vtk,idensity_matrix)
+            print(f"[WARNING] 节点已创建,但当前是单位矩阵(无变换)!")
+            print(f"[WARNING] 机械臂将执行错误的坐标。请在'Transforms'模块中调整 {transform_node_name} 或进行手眼标定。")
+
+            # 5. 将矩阵应用到节点
+            self.calibNode.SetMatrixTransformToParent(matrix_vtk)
+
+            # print(f"[INFO] 当前使用的变换矩阵:\n{self.slicerToKukaTransform}")
+
     def setup(self) -> None:
         """Called when the user opens the module the first time and the widget is initialized."""
         ScriptedLoadableModuleWidget.setup(self)
@@ -166,7 +202,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         connectionCollapsible = ctkCollapsibleButton()
         connectionCollapsible.text = "通信"
         self.layout.addWidget(connectionCollapsible)
-        
+
         formLayout = qt.QFormLayout(connectionCollapsible)
 
         # 目标 IP
@@ -250,9 +286,13 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         slicer.mrmlScene.AddNode(self.igtlConnector)
 
         # 创建 ModelNode 并注册为 outgoing
-        self.pathModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode","RobotPath")
-        self.pathModelNode.SetAttribute("HideFromEditors","true")
-        self.igtlConnector.RegisterOutgoingMRMLNode(self.pathModelNode)
+        # self.pathModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode","RobotPath")
+        self.pathStringNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTextNode","DeltaData")
+        # self.pathModelNode.SetAttribute("HideFromEditors","true")
+        self.pathStringNode.SetAttribute("HideFromEditors","true")
+        
+        # self.igtlConnector.RegisterOutgoingMRMLNode(self.pathModelNode)
+        self.igtlConnector.RegisterOutgoingMRMLNode(self.pathStringNode)
 
         # 创建心跳节点
         self.heartbeatNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode","Heartbeat")
@@ -275,7 +315,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.statusNode.SetAttribute("HideFromEditors","true")
         self.igtlConnector.RegisterIncomingMRMLNode(self.statusNode)
         self.addObserver(self.statusNode,vtk.vtkCommand.ModifiedEvent,self._onServerStatusUpdate)
-        
+
         # 启动连接器后立即同步一次状态
         self._onConnectorModified(self.igtlConnector,vtk.vtkCommand.ModifiedEvent)
 
@@ -283,7 +323,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         node = callData
         if not node or not isinstance(node,slicer.vtkMRMLIGTLStatusNode):
             return
-        
+
         # 检查是否是我们关心的 DeviceName
         device_name = node.GetIgtlDeviceName()
         print(f"[DEBUG] New IGTLStatusNode created: {node.GetName()},DeviceName='{device_name}")
@@ -304,6 +344,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if status_string and "shutting down" in status_string.lower():
             print("Received server shutdown notification:",status_string)
             self._handleDisconnection()
+
     def _onConnectorModified(self,caller,event):
         if not self.igtlConnector:
             print("被移除\n")
@@ -344,7 +385,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if hasattr(self,'heartbeatTimer') and self.heartbeatTimer:
             self.heartbeatTimer.stop()
             self.heartbeatTimer = None
-        
+
         if self.igtlConnector:
             # 移除对连接器的观察器
             self.removeObserver(self.igtlConnector,vtk.vtkCommand.ModifiedEvent,self._onConnectorModified)
@@ -357,7 +398,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             node = slicer.mrmlScene.GetFirstNodeByName(nodeName)
             if node:
                 slicer.mrmlScene.RemoveNode(node)
-        
+
         self.pathModelNode = None
 
         # 移除场景节点添加观察器
@@ -381,7 +422,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _sendHeartbeat(self):
         if not self.igtlConnector or self.igtlConnector.GetState() != 2:
             return
-        
+
         poly = vtk.vtkPolyData()
         points = vtk.vtkPoints()
         points.InsertNextPoint(0.0,0.0,0.0)
@@ -396,7 +437,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def onGetPath(self)->None:
         pathName = self.pathEdit.text.strip()
-        
+
         if pathName=="":
             self.showError("请输入路径名")
             return
@@ -414,7 +455,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not hasattr(pathNode,'GetNumberOfControlPoints'):
             self.showError("请选择一个 Markups 节点")
             return
-        
+
         self.pointsSet.clear()
 
         # 遍历所有点,获取点坐标
@@ -423,7 +464,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if pointsNum == 0:
             self.showError("该 Markups 节点没有控制点")
             return
-        
+
         # 默认姿态(四元数)
         default_quat = [0.0,0.0,0.0,1.0]
 
@@ -435,7 +476,7 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         else:
             print("没有足够的点位进行计算\n")
             return
-        
+
         print("已获取路径点位")
 
     def createPathPolyDataWithOrientation(self,points_with_orientation):
@@ -457,6 +498,145 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         polyData.GetPointData().AddArray(quat_array)
         return polyData
 
+    def quaternion_to_kuka_abc(self,quat):
+        """
+        将四元数 [x, y, z, w] 转换为 KUKA 风格的 A, B, C (度)。
+
+        数学定义 (Z-Y-X 顺序):
+          1. 绕 Z 轴旋转 C 角 (Yaw)
+          2. 绕 Y 轴旋转 B 角 (Pitch)
+          3. 绕 X 轴旋转 A 角 (Roll)
+        返回值: (A, B, C)
+          A: 绕 X 轴角度 (Roll)
+          B: 绕 Y 轴角度 (Pitch)
+          C: 绕 Z 轴角度 (Yaw)
+        """
+        x,y,z,w = quat
+
+        # 归一化
+        norm = math.sqrt(x*x+y*y+z*z+w*w)
+        if norm == 0:return 0.0,0.0,0.0
+        x,y,z,w = x/norm,y/norm,z/norm,w/norm
+
+        # --- 标准 Z-Y-X 欧拉角提取公式 ---
+        # 1. 计算 B (Pitch,绕 Y 轴)
+        # sin(B) = 2 * (w*y - z*x)
+        sinp = 2*(w*y - z*x)
+        if abs(sinp) >= 1:
+            # 万向节死锁: Pitch = +/- 90 度
+            B = math.copysign(math.pi/2,sinp)
+            # 死锁时,A 和 C 耦合,通常设 A = 0,解算 C
+            A = 0.0
+            C = math.atan2(2*(w*z+x*y),1-2*(y*y+z*z))
+        else:
+            B = math.asin(sinp)
+
+        # 2. 计算 A (Roll,绕 X 轴)
+        sinr_cosp = 2*(w*x+y*z)
+        cosr_cosp = 1 - 2*(x*x+y*y)
+        A = math.atan2(sinr_cosp,cosr_cosp)
+
+        # 3. 计算 C (Yaw,绕 Z 轴)
+        siny_cosp = 2*(w*z+x*y)
+        cosy_cosp = 1-2*(y*y+z*z)
+        C = math.atan2(siny_cosp,cosy_cosp)
+
+        # 转换为角度 (度)
+        A_deg = math.degrees(A)
+        B_deg = math.degrees(B)
+        C_deg = math.degrees(C)
+
+        return A_deg,B_deg,C_deg
+
+    def rotation_matrix_to_quaternion(self,R):
+        """
+        将 3x3 旋转矩阵转换为四元数 [x,y,z,w]
+        """
+        trace = np.trace(R)
+
+        if trace > 0:
+            S = math.sqrt(trace+1.0)*2
+            qw = 0.25 * S
+            qx = (R[2,1] - R[1,2])/S
+            qy = (R[0,2] - R[2,0])/S
+            qz = (R[1,0] - R[0,1])/S
+        elif(R[0,0] > R[1,1]) and (R[0,0] > R[2,2]):
+            S = math.sqrt(1.0+R[0,0]-R[1,1]-R[2,2])*2
+            qw = (R[2,1]-R[1,2])/S
+            qx = 0.25*S
+            qy = (R[0,1]+R[1,0])/S
+            qz = (R[0,2]+R[2,0])/S
+        elif R[1,1] > R[2,2]:
+            S = math.sqrt(1.0+R[1,1]-R[0,0]-R[2,2])*2
+            qw = (R[0,2] - R[2,0])/S
+            qx = (R[0,1] + R[1,0])/S
+            qy = 0.25*S
+            qz = (R[1,2]+R[2,1])/S
+        else:
+            S = math.sqrt(1.0+R[2,2]-R[0,0]-R[1,1])*2
+            qw = (R[1,0]-R[0,1])/S
+            qx = (R[0,2]+R[2,0])/S
+            qy = (R[1,2]+R[2,1])/S
+            qz = 0.25*S
+
+        # 归一化结果
+        norm = math.sqrt(qx*qx+qy*qy+qz*qz+qw*qw)
+        if norm > 0:
+            return [qx/norm,qy/norm,qz/norm,qw/norm]
+        else:
+            return [0.0,0.0,0.0,1.0]
+
+    def apply_coordinate_transform(self,pos,quat,transform_matrix):
+        """
+        将点和姿态从 Slicer 坐标系变换到 KUKA (目标) 坐标系
+
+        参数:
+            pos: [x,y,z] (Slicer 坐标)
+            quat: [x,y,z,w] (Slicer 姿态,四元数)
+            transform_matrix: 4x4 numpy array (齐次变换矩阵,表示 Slicer -> KUKA 的变换)
+                            即 P_kuka = T * P_slicer
+
+        返回:
+            new_pos: [x,y,z] (KUKA 坐标)
+            new_quat: [x,y,z,w] (KUKA 姿态,四元数)
+        """
+
+        # --- 1. 变换位置 (Position) ---
+        # 将 3D 点转换为齐次坐标 [x,y,z,1]
+        p_homogeneous = np.array([pos[0],pos[1],pos[2],1.0])
+
+        # 应用变换矩阵: P_new = T * P_old
+        p_transformed = np.dot(transform_matrix,p_homogeneous)
+
+        # 提取前三个分量作为新坐标
+        new_pos = p_transformed[:3].tolist()
+
+        # --- 2. 变换姿态 (Orientation) ---
+        # 提取变换矩阵的旋转部分 (3x3)
+        R_transform = transform_matrix[:3,:3]
+
+        # 将输入四元数转换为旋转矩阵 (3x3)
+        x,y,z,w = quat
+
+        # 归一化
+        norm = np.sqrt(x*x+y*y+z*z+w*w)
+        if norm > 0:
+            x,y,z,w = x/norm,y/norm,z/norm,w/norm
+
+        R_Slicer = np.array([
+            [1-2*y*y-2*z*z,2*x*y-2*z*w,2*x*z+2*y*w],
+            [2*x*y+2*z*w,1-2*x*x-2*z*z,2*y*z-2*x*w],
+            [2*x*z-2*y*w,2*y*z+2*x*w,1-2*x*x-2*y*y]
+        ])
+
+        # 计算新坐标系下的旋转矩阵
+        R_kuka = np.dot(R_transform,R_Slicer)
+
+        # 将新的旋转矩阵转换回四元数 [x,y,z,w]
+        new_quat = self.rotation_matrix_to_quaternion(R_kuka)
+
+        return new_pos,new_quat
+
     def onStorePath(self)->None:
         if not self.pointsSet:
             slicer.util.warningDisplay("请先获取路径点")
@@ -466,35 +646,108 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.warningDisplay("连接已断开,请重新连接!")
             return
 
-        # 创建 PolyData
-        polyData = vtk.vtkPolyData()
-        points = vtk.vtkPoints()
-        vertices = vtk.vtkCellArray()
+        # 动态获取最新矩阵
+        try:
+            if not self.calibNode:
+                self.calibNode = slicer.util.getNode("HandEyeCalibration")
 
-        for pos,quat in self.pointsSet:
-            pointId = points.InsertNextPoint(pos[0],pos[1],pos[2])
-            vertices.InsertNextCell(1)
-            vertices.InsertCellPoint(pointId)
+        # 每次发送都重新读取,确保用户刚在 Transforms 模块的修改生效
+            matrix_vtk = vtk.vtkMatrix4x4()
+            self.calibNode.GetMatrixTransformToParent(matrix_vtk)
 
-        polyData.SetPoints(points)
-        polyData.SetVerts(vertices)
+            current_transform_matrix = np.array([
+                [matrix_vtk.GetElement(r,c) for c in range(4)]
+                for r in range(4)
+            ])
 
-        # 添加方向数组
-        quat_array = vtk.vtkFloatArray()
-        quat_array.SetName("Orientation")
-        quat_array.SetNumberOfComponents(4)
-        for pos,quat in self.pointsSet:
-            quat_array.InsertNextTuple4(quat[0],quat[1],quat[2],quat[3])
-        polyData.GetPointData().AddArray(quat_array)
+        except Exception as e:
+            slicer.util.errorDisplay(f"获取变换矩阵失败: {e}")
+            return
 
-        # 更新模型数据
-        self.pathModelNode.SetAndObservePolyData(polyData)
-        self.pathModelNode.Modified()
-        # self.igtlConnector.PushNode(self.pathModelNode)
+        print(f"[INFO] 开始处理 {len(self.pointsSet)} 个路径点并生成二进制流...")
 
-        # 更新数据 -> 触动自动发送
-        print(f"已发送{len(self.pointsSet)} 个位姿 (POLYDATA) 到 IGTL 服务器")
-        slicer.util.infoDisplay(f"成功发送 {len(self.pointsSet)} 个路径点!")
+        # 临时存储转换后的绝对坐标,用于增量计算
+        abs_points = []
+
+        # 2. 第一遍遍历: 坐标变换 & 四元数转 ABC
+        for i,(pos,quat) in enumerate(self.pointsSet):
+            # A. 坐标变换 (Slicer -> KUKA)
+            kuka_pos,kuka_quat = self.apply_coordinate_transform(pos,quat,current_transform_matrix)
+
+            # B. 四元数转 KUKA 欧拉角 (A,B,C) -> 角度制
+            A,B,C = self.quaternion_to_kuka_abc(kuka_quat)
+
+            abs_points.append({
+                'x':kuka_pos[0],
+                'y':kuka_pos[1],
+                'z':kuka_pos[2],
+                'a':A,
+                'b':B,
+                'c':C
+            })
+
+        # 3. 第二遍遍历: 计算增量 -> 打包 -> 发送
+        delta_groups = []
+
+        for i,pt in enumerate(abs_points):
+            if i == 0:
+                # 第一个点:起始点采用绝对坐标
+                # dx = pt['x']
+                # dy = pt['y']
+                # dz = pt['z']
+                # da = pt['a']
+                # db = pt['b']
+                # dc = pt['c']
+                dx = 0
+                dy = 0
+                dz = 0
+                da = 0
+                db = 0
+                dc = 0
+                print(f"dx: {dx}; dy: {dy}; dz: {dz}; da: {da}; db: {db}; dc: {dc}\n")
+            else:
+                prev_pt = abs_points[i-1]
+
+                dx = round(pt['x']-prev_pt['x'],4)
+                dy = round(pt['y']-prev_pt['y'],4)
+                dz = round(pt['z']-prev_pt['z'],4)
+                da = round(pt['a']-prev_pt['a'],4)
+                db = round(pt['b']-prev_pt['b'],4)
+                dc = round(pt['c']-prev_pt['c'],4)
+                print(f"dx: {dx}; dy: {dy}; dz: {dz}; da: {da}; db: {db}; dc: {dc}\n")
+            delta_groups.append((dx,dy,dz,da,db,dc))
+
+        # --- 打包过程 ---
+
+        # 1. 准备头部: 总组数 (无符号整型,4 字节)
+        count = len(delta_groups)
+
+        # '<I' 表示: 小端序,无符号整型 (Unsigned Int, 4 字节)
+        header = struct.pack('<I',count)
+
+        # 2. 优化数据体
+        flat_data = list(itertools.chain.from_iterable(delta_groups))
+
+        # 动态构建格式字符串:例如 100 组 * 6 个 = 600 个 float -> '<600f'
+        format_str = f'{count*6}f'
+
+        body = struct.pack(format_str,*flat_data)
+
+        # 3. 合并
+        binary_data = header + body
+
+        print(f"总大小: {len(binary_data)} 字节")
+
+        # 4. 更新传输的数据
+        # data_string = binary_data.decode('latin-1')
+        # self.pathStringNode.SetText(data_string)
+        import base64
+        text_data = base64.b64encode(binary_data).decode('ascii')
+        self.pathStringNode.SetText(text_data)
+        # self.pathStringNode.SetText(binary_data)
+
+        # 5. 触发更新
+        self.pathStringNode.Modified()
 
     def showError(self,message)->None:
         slicer.util.errorDisplay(message)
