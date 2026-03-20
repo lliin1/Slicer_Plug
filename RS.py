@@ -25,6 +25,7 @@ import struct
 
 import itertools
 
+
 #
 # RS
 #
@@ -238,6 +239,67 @@ class RSWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         pathLabel.setStyleSheet("font-weight:bold;font-size:10pt;color:black")
         self.pathEdit = qt.QLineEdit("CC")
         formLayout.addRow(pathLabel,self.pathEdit)
+
+        # 标定点
+        # 1. 定义所有组名 (Calibration Groups)
+        calibration_groups = ["calibration1","calibration2","calibration3"]
+
+        # 2. 定义配置列: (后缀,标签文本)
+        config = [
+            ("x","X (mm):"),
+            ("y","Y (mm):"),
+            ("z","Z (mm):"),
+            ("a","A (°):"),
+            ("b","B (°):"),
+            ("c","C (°):"),
+        ]
+
+        # 3. 嵌套循环生成所有控件
+        for i,goup_name in enumerate(calibration_groups):
+            # 为每一组添加一个分割标题,让界面更清洗
+            title_name = qt.QLabel(f"标定点{i}")
+            title_name.setStyleSheet("font-weight:bold;font-size:10pt;color:black")
+            title_name.setAlignment(qt.Qt.AlignCenter)
+            formLayout.addRow(title_name)
+
+            # --- 创建网格布局 (2行3列) ---
+            gridLayout = qt.QGridLayout()
+            gridLayout.setContentsMargins(0,0,0,0) # 去除多余边框
+            gridLayout.setSpacing(5) # 控件之间的间距
+
+            # --- 循环填充网格 ---
+            for index,(suffix,label_text) in enumerate(config):
+                # 计算行和列
+                row = index // 3
+                col = index % 3
+
+                # --- 动态构建属性名 ---
+                label_name = f"{calibration_groups}_{suffix}Label"
+                edit_name = f"{calibration_groups}_{suffix}Edit"
+
+                label = qt.QLabel(label_text)
+                label.setMaximumWidth(80)
+                
+                edit = qt.QLineEdit()
+                # 让输入框填满单元格
+                edit.setSizePolicy(qt.QSizePolicy.Expanding,qt.QSizePolicy.Preferred)
+
+                # 绑定到 self(保持变量名可用)
+                setattr(self,edit_name,edit)
+
+                # --- 添加到网格的具体位置 ---
+                gridLayout.addWidget(label,row,col*2)  # 标签放在偶数列 (0,2,4)
+                gridLayout.addWidget(edit,row,col*2+1) # 输入框放在奇数列 (1,3,5)
+        
+            containerWidget = qt.QWidget()
+            containerWidget.setLayout(gridLayout)
+
+            formLayout.addRow(containerWidget)
+            formLayout.setSpacing(15)
+
+        # 坐标变换
+        self.transformation_Button = qt.QPushButton("坐标变换")
+        formLayout.addRow(self.transformation_Button)
 
         # 获取路径
         self.getPath_Button = qt.QPushButton("获取路径")
